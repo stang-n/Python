@@ -1,0 +1,268 @@
+# importing required modules
+import pypdf
+import os
+import glob
+import re
+import datetime
+
+# Precompile the regular expressions to get the SSID and school to make it faster
+# The SSID and Grade digit are run together: Doe9999 123 4568Spring 2023
+ssid_regex = re.compile('(^[0-9]{4} [0-9]{3} [0-9]{3})')
+school_regex = re.compile('\\(([0-9]{5}_[0-9]{4})\\)')
+name_regex = re.compile('([^\n]*)')
+
+students = dict()
+element_index = 0
+page_type = 'ZZZ'       # 'ENG' or 'SCI'
+ssid = '0000_000_000'
+student_name = 'NoName'
+school_id = '00000_0000'
+error_count = 0
+
+log_file = open("split_pdf_log.json", "wt")
+
+counts = {'pdf_file': '',
+          'pages_read': 0, 'pages_output': 0, 'student_count': 0, 'blank_page': 0,
+          'missing_name': 0, 'missing_ssid': 0, 'missing_school': 0, 'errors': 0}
+
+# The **/ below selects all directories under the current directory
+# Change it to use a different directory choice
+def find_all_input_pdf_files():
+    files = glob.glob('**/[0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9]_*.PDF', recursive=True)
+    input_file_count = len(files)
+    input_file_index = 0
+    print('There are {} input files'.format(input_file_count))
+    for file in files:
+        input_file_index += 1
+        print('=== File {} of {}: {}'.format(input_file_index, input_file_count, file))
+        read_pdf_file(file)
+
+
+def read_pdf_file(input_pdf_filename):
+    # Initialize data
+    global students
+    global page_type
+    global element_index
+    global ssid
+    global student_name
+    global school_id
+    global counts
+    global error_count
+
+    students = dict()
+    element_index = 0
+
+    counts = {'pdf_file': input_pdf_filename.replace('\\', '/'),
+              'pages_read': 0, 'pages_output': 0, 'student_count': 0, 'blank_page': 0,
+              'missing_name': 0, 'missing_ssid': 0, 'missing_school': 0, 'errors': 0}
+
+    # creating a pdf file object
+    pdf_file_obj = open(input_pdf_filename, 'rb')
+
+    # creating a pdf reader object
+    pdf_reader = pypdf.PdfReader(pdf_file_obj)
+    print('PDF has {} pages  {}'.format(len(pdf_reader.pages), datetime.datetime.now()))
+
+    # Create map of Student ID to file name and list of pages for that student
+    for i in range(len(pdf_reader.pages)):
+        read_page(pdf_reader, i)
+
+    print('PDF pages: {}; Student count: {}'.format(len(pdf_reader.pages), len(students)))
+
+    for student in students.values():
+        # print('Student: {}'.format(student))
+        pdf_writer = pypdf.PdfWriter()
+        # output pdf file name
+        output_dir = os.path.dirname(os.path.abspath(input_pdf_filename))
+        output_pdf = output_dir + '\\' + student[0]
+
+        # adding pages to pdf writer object
+        for page_num in student[1]:
+            ### print('page: {}'.format(page))
+            try:
+                pdf_writer.add_page(pdf_reader.pages[page_num])
+                counts['pages_output'] += 1
+            except Exception as err:
+                print('Failed to write page {} of PDF {}'.format(page_num, input_pdf_filename))
+                print(err)
+                counts['errors'] += 1
+
+        # writing split pdf pages to pdf file
+        with open(output_pdf, "wb") as f:
+            pdf_writer.write(f)
+
+    # closing the pdf file object
+    pdf_file_obj.close()
+
+    error_count += counts['errors']
+    print(counts)
+    log_file.write(' ' + str(counts).replace("'", '"') + ',\n')
+
+def get_element_number_for_name(page_type):
+    if page_type == 'ENG':
+        return 75
+    elif page_type == 'MATH':
+        return 75
+    elif page_type == 'SCI_1':
+        return 94
+    elif page_type == 'SCI_2':
+        return 121
+    elif page_type == 'NA':
+        return 9999
+    else:
+        counts['errors'] += 1
+        print('Invalid page type: {}'.format(page_type))
+        return 9999
+
+
+def get_element_number_for_ssid_school(page_type):
+    if page_type == 'ENG':
+        return 76
+    elif page_type == 'MATH':
+        return 76
+    elif page_type == 'SCI_1':
+        return 95
+    elif page_type == 'SCI_2':
+        return 122
+    elif page_type == 'NA':
+        return 9999
+    else:
+        counts['errors'] += 1
+        print('Invalid page type: {}'.format(page_type))
+        return 9999
+
+
+def process_page_element(element_text, cm, tm, font_dict, font_size):
+    global element_index
+    global page_type
+    global ssid
+    global student_name
+    global school_id
+
+    if len(element_text) > 4:
+        # print("Element {}: {}".format(element_index, element_text))
+
+        if element_text == 'Science Test Results: Washington Comprehensive Assessment of Science':
+            if element_index == 62:
+                page_type = 'SCI_1'
+            elif element_index == 66:
+                page_type = 'SCI_2'
+            else:
+                counts['errors'] += 1
+                print('Error in Science page: Element {} has the text label'.format(element_index))
+        if element_text == 'English Language Arts Test Results: Smarter Balanced Assessment':
+            page_type = 'ENG'
+        if element_text == 'Mathematics Test Results: Smarter Balanced Assessment':
+            page_type = 'MATH'
+
+        # Format for Spring 2023
+        if element_index == get_element_number_for_name(page_type):
+            name_match = name_regex.search(element_text)
+            if name_match:
+                student_name = name_match.group(1)
+                # print("--- Name: [{}] '{}'".format(element_index, student_name))
+            else:
+                counts['errors'] += 1
+                print("Expecting name in [{}], got '{}'".format(element_index, element_text))
+        if element_index == get_element_number_for_ssid_school(page_type):
+            ssid_match = ssid_regex.search(element_text)
+            if ssid_match:
+                ssid = ssid_match.group(1).replace(' ', '')
+                # print("--- SSID: [{}] '{}'".format(element_index, ssid))
+            else:
+                counts['errors'] += 1
+                print("Expecting SSID in {} [{}], got '{}'".format(page_type, element_index, element_text))
+
+            school_match = school_regex.search(element_text)
+            if school_match:
+                school_id = school_match.group(1)
+                # print("--- School ID: [{}] '{}'".format(element_index, school_id))
+            else:
+                counts['errors'] += 1
+                print("Expecting School ID in {} [{}], got '{}'".format(page_type, element_index, element_text))
+
+    element_index += 1
+
+
+def add_page_to_student_list(page_num):
+    # Find the student name.  
+    # Extracting student ID, name, district and school
+
+    name = student_name.replace(' ', '_')\
+                       .replace("'", '')\
+                       .replace('.', '')\
+                       .replace('’', '')\
+                       .replace('[^-a-zA-Z_]', '')\
+                       .replace('_', '-')\
+                       .replace('--', '-')
+
+    file_name = ssid + name + '.pdf'
+
+    if ssid in students:
+        # Add the page number to the student's entry
+        students[ssid][1].append(page_num)
+        # print("--- Appending page {} to SSID {}".format(page_num, ssid))
+
+        # Update the file name to include the student name,
+        # if not already there and available on this page
+        if '_NA_' in students[ssid][0]:
+            students[ssid][0] = file_name
+            print("--- Adding _NA_ page {} to SSID {}".format(page_num, ssid))
+    else:
+        counts['student_count'] += 1
+        students[ssid] = (file_name, [page_num])
+        # print("--- Adding page {} to SSID {}".format(page_num, ssid))
+
+
+def read_page(pdf_reader, page_num):
+    global students
+    global page_type
+    global element_index
+    global ssid
+    global student_name
+    global school_id
+    global counts
+
+    ssid = '0000_000_000'
+    student_name = 'NoName'
+    school_id = '00000_0000'
+    page_type = 'NA'
+
+    # print('-- Reading page {}'.format(page_num))
+    page_obj = pdf_reader.pages[page_num]
+    # extracting text from page
+    counts['pages_read'] += 1
+    element_index = 0
+    page_text = page_obj.extract_text(visitor_text=process_page_element)
+    if page_text == '':
+        counts['blank_page'] += 1
+        # print('---- Blank page on page {} of {} ----'.format(page_num, pdf_reader.documentInfo['/Title']))
+        return
+
+    # If a valid page was seen, add the page to the student's PDF
+    if school_id != '00000_0000' and ssid != '0000_000_000' and student_name != 'NoName':
+        add_page_to_student_list(page_num)
+    else:
+        counts['errors'] += 1
+        if school_id == '00000_0000':
+            counts['missing_school'] += 1
+        if ssid == '0000_000_000':
+            counts['missing_ssid'] += 1
+        if student_name == 'NoName':
+            counts['missing_name'] += 1
+        print('!!! Invalid page data {}, {}, {}'.format(ssid, student_name, school_id))
+        print(page_text)
+
+
+start_time = datetime.datetime.now()
+print('Starting at {}'.format(start_time))
+log_file.write('{ "start_time": "' + str(start_time) + '",\n')
+find_all_input_pdf_files()
+end_time = datetime.datetime.now()
+log_file.write(' "end_time": "' + str(end_time) + '",\n')
+log_file.write(' "error_count": ' + str(error_count) + ' }\n')
+log_file.close()
+
+print('Started at  {}'.format(start_time))
+print('Finished at {}'.format(end_time))
+print('Run time:   {}'.format(end_time - start_time))
